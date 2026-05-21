@@ -1,144 +1,79 @@
-```javascript
 /**
  * ====================================================
  * MasterChef/BusinessLogic.gs
- * גרסה: v1.5 (20/05/2026)
- * סטטוס: ✅ STABLE
- * פרויקט: MasterChef
- *
- * תיאור: לוגיקה עסקית מרכזית של פרויקט MasterChef —
- *        קביעת זוכה, שליחת סקר לווטסאפ, שליחת חומרים שבועיים
- *
- * פונקציות:
- *   determineWinner(week)      — קובע זוכה שבוע לפי הצבעות, בשוויון: גורל שווה פי 2
- *   sendPoll(trends)           — שולח סקר לקבוצת ווטסאפ עם 3-4 טרנדים
- *   sendWeeklyContent(week)    — שולח חומרים מלאים לזוכה השבועי
+ * לוגיקה עסקית — קביעת זוכה, שליחת סקר, שליחת חומרים שבועיים
  * ====================================================
  */
 
 // ============================================================
-// קביעת זוכה השבוע לפי הצבעות
+// קביעת זוכה השבוע
 // ============================================================
 
 /**
- * determineWinner
- * ---------------
- * קורא את טאב Votes, מסנן לפי מספר שבוע,
- * מוצא את הטרנד עם הכי הרבה קולות.
- * בשוויון — גורל שווה משוקלל (שוויון מקבל פי 2 סיכוי).
- *
- * @param {number} week — מספר השבוע לקביעת הזוכה
- * @returns {string|null} שם הטרנד הזוכה, או null בכישלון
+ * determineWinner — קובע את הזוכה על פי תוצאות ההצבעה של השבוע
+ * @param {number} week — מספר השבוע לבדיקה
+ * @return {string|null} שם הזוכה או null בכישלון
  */
 function determineWinner(week) {
   try {
-    // ולידציה של הפרמטר
-    if (!week || isNaN(week)) {
-      Logger.log('[' + PROJECT_NAME + '] determineWinner — שבוע לא תקין: ' + week);
+    var ss      = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var shVotes = ss.getSheetByName(SHEET_VOTES);
+
+    if (!shVotes) {
+      Logger.log('determineWinner: טאב Votes לא נמצא');
       return null;
     }
 
-    // פתיחת הגיליון
-    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    var votesSheet = ss.getSheetByName(SHEET_VOTES);
-    if (!votesSheet) {
-      Logger.log('[' + PROJECT_NAME + '] determineWinner — טאב Votes לא נמצא');
+    var data     = shVotes.getDataRange().getValues();
+    var bestRow  = null;
+    var bestCount = -1;
+    var tieCount  = 0;
+
+    // סריקת שורות — מדלגים על כותרת
+    for (var i = DATA_START_ROW - 1; i < data.length; i++) {
+      var row = data[i];
+      if (String(row[COL_VOTES_WEEK - 1]) !== String(week)) continue;
+
+      var count = Number(row[COL_VOTES_COUNT - 1]) || 0;
+      if (count > bestCount) {
+        bestCount = count;
+        bestRow   = row;
+        tieCount  = 1;
+      } else if (count === bestCount) {
+        tieCount++;
+      }
+    }
+
+    if (!bestRow) {
+      Logger.log('determineWinner: לא נמצאו הצבעות לשבוע ' + week);
       return null;
     }
 
-    // קריאת כל הנתונים
-    var lastRow = votesSheet.getLastRow();
-    if (lastRow < DATA_START_ROW) {
-      Logger.log('[' + PROJECT_NAME + '] determineWinner — אין נתוני הצבעה בגיליון');
-      return null;
+    var winner = String(bestRow[COL_VOTES_WINNER - 1]);
+
+    // בונוס תיקו
+    if (tieCount > 1) {
+      bestCount = bestCount * TIE_BONUS_MULTIPLIER;
+      Logger.log('determineWinner: תיקו — הופעל מכפיל ' + TIE_BONUS_MULTIPLIER);
     }
 
-    var data = votesSheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, 5).getValues();
-
-    // איסוף קולות לפי טרנד עבור השבוע הנבחר
-    var votesMap = {};
-    for (var i = 0; i < data.length; i++) {
-      var rowWeek  = Number(data[i][COL_VOTES_WEEK  - 1]);
-      var rowTrend = String(data[i][COL_VOTES_TREND - 1]).trim();
-      var rowCount = Number(data[i][COL_VOTES_COUNT - 1]);
-
-      // סינון לפי שבוע
-      if (rowWeek !== Number(week)) continue;
-      if (!rowTrend) continue;
-
-      // צבירת קולות
-      if (votesMap[rowTrend] === undefined) {
-        votesMap[rowTrend] = 0;
-      }
-      votesMap[rowTrend] += rowCount;
+    // שמירת הזוכה ב-Results
+    var shResults = ss.getSheetByName(SHEET_MAIN);
+    if (shResults) {
+      shResults.appendRow([
+        new Date(),
+        bestRow[COL_VOTES_TREND - 1],
+        winner,
+        '',
+        ''
+      ]);
     }
 
-    // בדיקה שיש נתונים
-    var trendNames = Object.keys(votesMap);
-    if (trendNames.length === 0) {
-      Logger.log('[' + PROJECT_NAME + '] determineWinner — לא נמצאו הצבעות לשבוע ' + week);
-      return null;
-    }
-
-    // מציאת מספר הקולות המקסימלי
-    var maxVotes = 0;
-    for (var j = 0; j < trendNames.length; j++) {
-      if (votesMap[trendNames[j]] > maxVotes) {
-        maxVotes = votesMap[trendNames[j]];
-      }
-    }
-
-    // איסוף כל הטרנדים עם הקולות המרביים (מצב שוויון)
-    var winners = [];
-    for (var k = 0; k < trendNames.length; k++) {
-      if (votesMap[trendNames[k]] === maxVotes) {
-        winners.push(trendNames[k]);
-      }
-    }
-
-    var chosenWinner = '';
-
-    // אם יש זוכה אחד ברור — הוא הזוכה
-    if (winners.length === 1) {
-      chosenWinner = winners[0];
-      Logger.log('[' + PROJECT_NAME + '] determineWinner — זוכה ברור: ' + chosenWinner + ' (' + maxVotes + ' קולות)');
-
-    } else {
-      // שוויון — גורל משוקלל: כל טרנד בשוויון מקבל פי 2 מהטרנדים שאינם בשוויון
-      // כיוון שכולם בשוויון, נבנה מערך משוקלל עם כפל עבור כל אחד מהם
-      Logger.log('[' + PROJECT_NAME + '] determineWinner — שוויון בין ' + winners.length + ' טרנדים, מפעיל גורל משוקלל');
-
-      var weightedPool = [];
-      for (var w = 0; w < winners.length; w++) {
-        // כל טרנד בשוויון נכנס פי 2 לסל הגורל
-        weightedPool.push(winners[w]);
-        weightedPool.push(winners[w]);
-      }
-
-      // בחירה אקראית מתוך הסל המשוקלל
-      var randomIndex = Math.floor(Math.random() * weightedPool.length);
-      chosenWinner = weightedPool[randomIndex];
-      Logger.log('[' + PROJECT_NAME + '] determineWinner — זוכה גורל: ' + chosenWinner);
-    }
-
-    // שמירת הזוכה בעמודה D של Votes
-    for (var r = 0; r < data.length; r++) {
-      var rowWeekCheck  = Number(data[r][COL_VOTES_WEEK  - 1]);
-      var rowTrendCheck = String(data[r][COL_VOTES_TREND - 1]).trim();
-      if (rowWeekCheck === Number(week) && rowTrendCheck === chosenWinner) {
-        votesSheet.getRange(DATA_START_ROW + r, COL_VOTES_WINNER).setValue(chosenWinner);
-        break;
-      }
-    }
-
-    // שמירת הזוכה ב-Script Properties לשימוש עתידי
-    PropertiesService.getScriptProperties().setProperty(PROP_KEY_CURRENT_TREND, chosenWinner);
-
-    Logger.log('[' + PROJECT_NAME + '] determineWinner — הסתיים בהצלחה. זוכה: ' + chosenWinner);
-    return chosenWinner;
+    Logger.log('determineWinner: זוכה שבוע ' + week + ' — ' + winner);
+    return winner;
 
   } catch (e) {
-    Logger.log('[' + PROJECT_NAME + '] determineWinner — שגיאה: ' + e.message);
+    Logger.log('determineWinner — שגיאה: ' + e.message);
     return null;
   }
 }
@@ -148,147 +83,179 @@ function determineWinner(week) {
 // ============================================================
 
 /**
- * sendPoll
- * --------
- * מקבל מערך של 3-4 טרנדים קולינריים ושולח הודעת סקר
- * לקבוצת הווטסאפ דרך Green API.
- * הסקר מנוסח בעברית עם הוראות הצבעה ברורות.
- *
- * @param {Array<string>} trends — מערך שמות טרנדים (3 עד 4 פריטים)
- * @returns {boolean} האם השליחה הצליחה
+ * sendPoll — שולח הצבעה לקבוצת ווטסאפ על בסיס רשימת טרנדים
+ * @param {Array} trends — מערך שמות טרנדים
+ * @return {boolean} האם השליחה הצליחה
  */
 function sendPoll(trends) {
   try {
-    // ולידציה של הפרמטר
-    if (!trends || !Array.isArray(trends)) {
-      Logger.log('[' + PROJECT_NAME + '] sendPoll — פרמטר trends אינו מערך תקין');
+    if (!trends || trends.length < MIN_TRENDS_FOR_POLL) {
+      Logger.log('sendPoll: מספר טרנדים לא מספיק (' + (trends ? trends.length : 0) + ')');
       return false;
     }
 
-    if (trends.length < 3 || trends.length > 4) {
-      Logger.log('[' + PROJECT_NAME + '] sendPoll — מספר טרנדים לא תקין: ' + trends.length + ' (נדרש 3-4)');
+    // חיתוך לפי מקסימום מוגדר
+    var pollTrends = trends.slice(0, MAX_TRENDS_FOR_POLL);
+
+    // בניית הודעת סקר
+    var msg = '🍳 *סקר המאסטרשף השבועי* 🍳\n\n';
+    msg += 'בחרו את הטרנד הקולינרי של השבוע:\n\n';
+    for (var i = 0; i < pollTrends.length; i++) {
+      msg += (i + 1) + '. ' + pollTrends[i] + '\n';
+    }
+    msg += '\nענו במספר בלבד 🙏';
+
+    // שליחה דרך Green API
+    var props       = PropertiesService.getScriptProperties();
+    var instanceId  = props.getProperty('INSTANCE_ID');
+    var apiToken    = props.getProperty('GREEN_API_TOKEN');
+
+    if (!instanceId || !apiToken) {
+      Logger.log('sendPoll: חסרים INSTANCE_ID או GREEN_API_TOKEN ב-Script Properties');
       return false;
     }
 
-    // בניית הודעת הסקר
-    var pollMessage = '🍳 *סקר שבועי — מאסטר שף!* 🍳\n\n';
-    pollMessage += 'הגיע הזמן לבחור את הטרנד הקולינרי של השבוע! 🌟\n\n';
-    pollMessage += 'הצביעו למועדפכם:\n\n';
-
-    var options = ['1️⃣', '2️⃣', '3️⃣', '4️⃣'];
-    for (var i = 0; i < trends.length; i++) {
-      pollMessage += options[i] + ' *' + trends[i] + '*\n';
-    }
-
-    pollMessage += '\nשלחו את מספר הבחירה שלכם בתגובה! ⬇️\n';
-    pollMessage += '🗳️ ההצבעה תיסגר מחר בצהריים (12:00)';
-
-    // קריאת פרטי Green API מ-Script Properties
-    var props        = PropertiesService.getScriptProperties();
-    var apiToken     = props.getProperty('GREEN_API_TOKEN');
-    var instanceId   = props.getProperty('INSTANCE_ID');
-
-    if (!apiToken || !instanceId) {
-      Logger.log('[' + PROJECT_NAME + '] sendPoll — GREEN_API_TOKEN או INSTANCE_ID חסרים ב-Script Properties');
-      return false;
-    }
-
-    // בניית ה-URL לשליחת הודעה דרך Green API
-    var apiUrl = 'https://api.green-api.com/waInstance' + instanceId + '/sendMessage/' + apiToken;
-
-    // בניית גוף הבקשה
-    var payload = {
+    var url     = 'https://api.green-api.com/waInstance' + instanceId + '/sendMessage/' + apiToken;
+    var payload = JSON.stringify({
       chatId:  WHATSAPP_GROUP_ID,
-      message: pollMessage
-    };
+      message: msg
+    });
 
-    // הגדרות הבקשה
     var options = {
       method:             'post',
       contentType:        'application/json',
-      payload:            JSON.stringify(payload),
+      payload:            payload,
       muteHttpExceptions: true
     };
 
-    // שליחה עם ניסיונות חוזרים
-    var success  = false;
-    var attempt  = 0;
-    var response = null;
+    var response = UrlFetchApp.fetch(url, options);
+    var code     = response.getResponseCode();
 
-    while (attempt < MAX_RETRIES && !success) {
-      attempt++;
-      Logger.log('[' + PROJECT_NAME + '] sendPoll — ניסיון ' + attempt + '/' + MAX_RETRIES);
-
-      try {
-        response = UrlFetchApp.fetch(apiUrl, options);
-        var responseCode = response.getResponseCode();
-
-        if (responseCode === 200) {
-          success = true;
-          Logger.log('[' + PROJECT_NAME + '] sendPoll — נשלח בהצלחה. קוד תגובה: ' + responseCode);
-        } else {
-          Logger.log('[' + PROJECT_NAME + '] sendPoll — קוד תגובה לא תקין: ' + responseCode + ' | תגובה: ' + response.getContentText());
-          if (attempt < MAX_RETRIES) {
-            Utilities.sleep(RETRY_SLEEP_MS);
-          }
-        }
-      } catch (fetchError) {
-        Logger.log('[' + PROJECT_NAME + '] sendPoll — שגיאת fetch בניסיון ' + attempt + ': ' + fetchError.message);
-        if (attempt < MAX_RETRIES) {
-          Utilities.sleep(RETRY_SLEEP_MS);
-        }
-      }
-    }
-
-    if (!success) {
-      Logger.log('[' + PROJECT_NAME + '] sendPoll — נכשל לאחר ' + MAX_RETRIES + ' ניסיונות');
+    if (code !== 200) {
+      Logger.log('sendPoll: שגיאת HTTP ' + code + ' — ' + response.getContentText());
       return false;
     }
 
-    // שמירת תאריך שליחת הסקר
-    var now = Utilities.formatDate(new Date(), TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
-    PropertiesService.getScriptProperties().setProperty(PROP_KEY_LAST_SURVEY, now);
-
-    // רישום בגיליון Results — עמודת זמן שליחה
-    try {
-      var ss          = SpreadsheetApp.openById(SPREADSHEET_ID);
-      var resultsSheet = ss.getSheetByName(SHEET_MAIN);
-      if (resultsSheet) {
-        var lastRow = resultsSheet.getLastRow();
-        if (lastRow >= DATA_START_ROW) {
-          // עדכון שורה אחרונה עם זמן שליחה
-          resultsSheet.getRange(lastRow, COL_RESULTS_SENT_AT).setValue(now);
-        }
-      }
-    } catch (sheetError) {
-      // שגיאה בגיליון לא אמורה לבטל הצלחת השליחה
-      Logger.log('[' + PROJECT_NAME + '] sendPoll — שגיאה ברישום בגיליון: ' + sheetError.message);
+    // רישום זמן שליחה ב-Results
+    var ss        = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var shResults = ss.getSheetByName(SHEET_MAIN);
+    if (shResults) {
+      shResults.appendRow([
+        new Date(),
+        pollTrends.join(', '),
+        '',
+        '',
+        new Date()
+      ]);
     }
 
-    Logger.log('[' + PROJECT_NAME + '] sendPoll — הסתיים בהצלחה');
+    // שמירת טרנד נוכחי ב-Properties
+    PropertiesService.getScriptProperties().setProperty(
+      PROP_KEY_LAST_SURVEY,
+      Utilities.formatDate(new Date(), TIMEZONE, 'yyyy-MM-dd')
+    );
+
+    Logger.log('sendPoll: נשלח בהצלחה עם ' + pollTrends.length + ' טרנדים');
     return true;
 
   } catch (e) {
-    Logger.log('[' + PROJECT_NAME + '] sendPoll — שגיאה: ' + e.message);
+    Logger.log('sendPoll — שגיאה: ' + e.message);
     return false;
   }
 }
 
 // ============================================================
-// שליחת חומרים שבועיים לזוכה
+// שליחת חומרים שבועיים לקבוצה
 // ============================================================
 
 /**
- * sendWeeklyContent
- * -----------------
- * מאחזר את חומרי השבוע מטאב Results Manager ושולח אותם
- * לקבוצת הווטסאפ. כולל: שם טרנד, סרטון, מצרכים ועלות.
- *
- * @param {number} week — מספר השבוע שחומריו ישלחו
- * @returns {boolean} האם השליחה הצליחה
+ * sendWeeklyContent — שולח חומרי שבוע (סרטון, מצרכים, עלות) לקבוצת ווטסאפ
+ * @param {number} week — מספר השבוע לשליחה
+ * @return {boolean} האם השליחה הצליחה
  */
 function sendWeeklyContent(week) {
   try {
-    // ולידציה של הפרמטר
-    if (!week || isNaN(week)) {
-      Logger.log('[' + PROJECT_NAME + '] sendWeeklyContent — שבוע ל
+    var ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var shRM  = ss.getSheetByName(SHEET_RESULTS_MGR);
+
+    if (!shRM) {
+      Logger.log('sendWeeklyContent: טאב Results לא נמצא');
+      return false;
+    }
+
+    var data    = shRM.getDataRange().getValues();
+    var content = null;
+
+    // מאתרים את שורת השבוע המבוקש
+    for (var i = DATA_START_ROW - 1; i < data.length; i++) {
+      if (String(data[i][COL_RM_WEEK - 1]) === String(week)) {
+        content = data[i];
+        break;
+      }
+    }
+
+    if (!content) {
+      Logger.log('sendWeeklyContent: לא נמצאו חומרים לשבוע ' + week);
+      return false;
+    }
+
+    var trend       = content[COL_RM_TREND       - 1];
+    var video       = content[COL_RM_VIDEO       - 1];
+    var ingredients = content[COL_RM_INGREDIENTS - 1];
+    var cost        = content[COL_RM_COST        - 1];
+
+    // בניית הודעה
+    var msg = '🍽️ *חומרי השבוע — ' + trend + '* 🍽️\n\n';
+    if (video)       msg += '🎬 סרטון: ' + video + '\n\n';
+    if (ingredients) msg += '🛒 מצרכים:\n' + ingredients + '\n\n';
+    if (cost)        msg += '💰 עלות משוערת: ' + cost + '\n\n';
+    msg += 'בהצלחה לכולם! 👨‍🍳';
+
+    // שליחה דרך Green API
+    var props      = PropertiesService.getScriptProperties();
+    var instanceId = props.getProperty('INSTANCE_ID');
+    var apiToken   = props.getProperty('GREEN_API_TOKEN');
+
+    if (!instanceId || !apiToken) {
+      Logger.log('sendWeeklyContent: חסרים INSTANCE_ID או GREEN_API_TOKEN');
+      return false;
+    }
+
+    var url     = 'https://api.green-api.com/waInstance' + instanceId + '/sendMessage/' + apiToken;
+    var payload = JSON.stringify({
+      chatId:  WHATSAPP_GROUP_ID,
+      message: msg
+    });
+
+    var options = {
+      method:             'post',
+      contentType:        'application/json',
+      payload:            payload,
+      muteHttpExceptions: true
+    };
+
+    var response = UrlFetchApp.fetch(url, options);
+    var code     = response.getResponseCode();
+
+    if (code !== 200) {
+      Logger.log('sendWeeklyContent: שגיאת HTTP ' + code + ' — ' + response.getContentText());
+      return false;
+    }
+
+    // עדכון סטטוס שליחה בגיליון
+    for (var r = DATA_START_ROW - 1; r < data.length; r++) {
+      if (String(data[r][COL_RM_WEEK - 1]) === String(week)) {
+        shRM.getRange(r + 1, COL_RM_SENT).setValue(true);
+        shRM.getRange(r + 1, COL_RM_SAVED_AT).setValue(new Date());
+        break;
+      }
+    }
+
+    Logger.log('sendWeeklyContent: חומרי שבוע ' + week + ' נשלחו בהצלחה');
+    return true;
+
+  } catch (e) {
+    Logger.log('sendWeeklyContent — שגיאה: ' + e.message);
+    return false;
+  }
+}

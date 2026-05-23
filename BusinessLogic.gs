@@ -1,7 +1,8 @@
 /**
  * ====================================================
  * MasterChef/BusinessLogic.gs
- * לוגיקה עסקית — קביעת זוכה, שליחת סקר, שליחת חומרים שבועיים
+ * גרסה: v1.5
+ * תיאור: לוגיקה עסקית — קביעת זוכה, שליחת סקר, שליחת חומרים שבועיים
  * ====================================================
  */
 
@@ -10,70 +11,72 @@
 // ============================================================
 
 /**
- * determineWinner — קובע את הזוכה על פי תוצאות ההצבעה של השבוע
- * @param {number} week — מספר השבוע לבדיקה
+ * קובעת את זוכה השבוע לפי תוצאות ההצבעה בגיליון Votes
+ * @param {number} week - מספר השבוע
  * @return {string|null} שם הזוכה או null בכישלון
  */
 function determineWinner(week) {
   try {
-    var ss      = SpreadsheetApp.openById(SPREADSHEET_ID);
-    var shVotes = ss.getSheetByName(SHEET_VOTES);
+    // בדיקת קלט
+    if (!week || isNaN(week)) {
+      throw new Error('מספר שבוע לא תקין: ' + week);
+    }
 
-    if (!shVotes) {
-      Logger.log('determineWinner: טאב Votes לא נמצא');
+    var ss      = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet   = ss.getSheetByName(SHEET_VOTES);
+
+    if (!sheet) {
+      throw new Error('טאב Votes לא נמצא');
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < DATA_START_ROW) {
+      Logger.log('determineWinner: אין נתונים בטאב Votes');
       return null;
     }
 
-    var data     = shVotes.getDataRange().getValues();
-    var bestRow  = null;
-    var bestCount = -1;
+    var data = sheet.getRange(DATA_START_ROW, 1, lastRow - HEADER_ROW, 5).getValues();
+
+    // חיפוש השורות של השבוע הנוכחי
+    var weekRows = [];
+    for (var i = 0; i < data.length; i++) {
+      if (String(data[i][COL_VOTES_WEEK - 1]) === String(week)) {
+        weekRows.push(data[i]);
+      }
+    }
+
+    if (weekRows.length === 0) {
+      Logger.log('determineWinner: לא נמצאו נתונים לשבוע ' + week);
+      return null;
+    }
+
+    // מציאת מקסימום קולות
+    var maxVotes  = 0;
+    var winner    = '';
     var tieCount  = 0;
 
-    // סריקת שורות — מדלגים על כותרת
-    for (var i = DATA_START_ROW - 1; i < data.length; i++) {
-      var row = data[i];
-      if (String(row[COL_VOTES_WEEK - 1]) !== String(week)) continue;
-
-      var count = Number(row[COL_VOTES_COUNT - 1]) || 0;
-      if (count > bestCount) {
-        bestCount = count;
-        bestRow   = row;
-        tieCount  = 1;
-      } else if (count === bestCount) {
+    for (var j = 0; j < weekRows.length; j++) {
+      var votes = Number(weekRows[j][COL_VOTES_COUNT - 1]);
+      if (votes > maxVotes) {
+        maxVotes = votes;
+        winner   = weekRows[j][COL_VOTES_WINNER - 1];
+        tieCount = 1;
+      } else if (votes === maxVotes) {
         tieCount++;
       }
     }
 
-    if (!bestRow) {
-      Logger.log('determineWinner: לא נמצאו הצבעות לשבוע ' + week);
-      return null;
-    }
-
-    var winner = String(bestRow[COL_VOTES_WINNER - 1]);
-
-    // בונוס תיקו
+    // טיפול בתיקו — בונוס כפול לזוכה הראשון שנמצא
     if (tieCount > 1) {
-      bestCount = bestCount * TIE_BONUS_MULTIPLIER;
-      Logger.log('determineWinner: תיקו — הופעל מכפיל ' + TIE_BONUS_MULTIPLIER);
+      Logger.log('determineWinner: תיקו — מוחל מכפיל ' + TIE_BONUS_MULTIPLIER);
+      maxVotes = maxVotes * TIE_BONUS_MULTIPLIER;
     }
 
-    // שמירת הזוכה ב-Results
-    var shResults = ss.getSheetByName(SHEET_MAIN);
-    if (shResults) {
-      shResults.appendRow([
-        new Date(),
-        bestRow[COL_VOTES_TREND - 1],
-        winner,
-        '',
-        ''
-      ]);
-    }
-
-    Logger.log('determineWinner: זוכה שבוע ' + week + ' — ' + winner);
-    return winner;
+    Logger.log('determineWinner: זוכה שבוע ' + week + ' — ' + winner + ' (' + maxVotes + ' קולות)');
+    return winner || null;
 
   } catch (e) {
-    Logger.log('determineWinner — שגיאה: ' + e.message);
+    Logger.log('שגיאה ב-determineWinner: ' + e.message);
     return null;
   }
 }
@@ -83,48 +86,54 @@ function determineWinner(week) {
 // ============================================================
 
 /**
- * sendPoll — שולח הצבעה לקבוצת ווטסאפ על בסיס רשימת טרנדים
- * @param {Array} trends — מערך שמות טרנדים
- * @return {boolean} האם השליחה הצליחה
+ * שולחת סקר לקבוצת ווטסאפ עם הטרנדים שנמצאו
+ * @param {Array} trends - מערך שמות טרנדים לשליחה בסקר
+ * @return {boolean} הצלחה/כישלון
  */
 function sendPoll(trends) {
   try {
-    if (!trends || trends.length < MIN_TRENDS_FOR_POLL) {
-      Logger.log('sendPoll: מספר טרנדים לא מספיק (' + (trends ? trends.length : 0) + ')');
-      return false;
+    // בדיקת קלט
+    if (!trends || !Array.isArray(trends)) {
+      throw new Error('רשימת טרנדים לא תקינה');
     }
 
-    // חיתוך לפי מקסימום מוגדר
+    if (trends.length < MIN_TRENDS_FOR_POLL) {
+      throw new Error('מספר טרנדים ' + trends.length + ' קטן מהמינימום ' + MIN_TRENDS_FOR_POLL);
+    }
+
+    // חיתוך לפי מקסימום
     var pollTrends = trends.slice(0, MAX_TRENDS_FOR_POLL);
 
     // בניית הודעת סקר
-    var msg = '🍳 *סקר המאסטרשף השבועי* 🍳\n\n';
-    msg += 'בחרו את הטרנד הקולינרי של השבוע:\n\n';
+    var message = '🍳 *סקר המאסטר שף השבועי!*\n\n';
+    message += 'מה הטרנד הקולינרי שתרצו לנסות השבוע? 👇\n\n';
+
     for (var i = 0; i < pollTrends.length; i++) {
-      msg += (i + 1) + '. ' + pollTrends[i] + '\n';
+      message += (i + 1) + '. ' + pollTrends[i] + '\n';
     }
-    msg += '\nענו במספר בלבד 🙏';
+
+    message += '\nהצביעו עם מספר הטרנד המועדף עליכם! 🗳️';
+
+    // קריאת Script Properties לטוקן
+    var props      = PropertiesService.getScriptProperties();
+    var token      = props.getProperty('GREEN_API_TOKEN');
+    var instanceId = props.getProperty('INSTANCE_ID');
+
+    if (!token || !instanceId) {
+      throw new Error('GREEN_API_TOKEN או INSTANCE_ID חסרים ב-Script Properties');
+    }
 
     // שליחה דרך Green API
-    var props       = PropertiesService.getScriptProperties();
-    var instanceId  = props.getProperty('INSTANCE_ID');
-    var apiToken    = props.getProperty('GREEN_API_TOKEN');
-
-    if (!instanceId || !apiToken) {
-      Logger.log('sendPoll: חסרים INSTANCE_ID או GREEN_API_TOKEN ב-Script Properties');
-      return false;
-    }
-
-    var url     = 'https://api.green-api.com/waInstance' + instanceId + '/sendMessage/' + apiToken;
-    var payload = JSON.stringify({
+    var url     = 'https://api.green-api.com/waInstance' + instanceId + '/sendMessage/' + token;
+    var payload = {
       chatId:  WHATSAPP_GROUP_ID,
-      message: msg
-    });
+      message: message
+    };
 
     var options = {
-      method:             'post',
-      contentType:        'application/json',
-      payload:            payload,
+      method:      'POST',
+      contentType: 'application/json',
+      payload:     JSON.stringify(payload),
       muteHttpExceptions: true
     };
 
@@ -132,34 +141,18 @@ function sendPoll(trends) {
     var code     = response.getResponseCode();
 
     if (code !== 200) {
-      Logger.log('sendPoll: שגיאת HTTP ' + code + ' — ' + response.getContentText());
-      return false;
+      throw new Error('Green API החזיר קוד ' + code + ': ' + response.getContentText());
     }
 
-    // רישום זמן שליחה ב-Results
-    var ss        = SpreadsheetApp.openById(SPREADSHEET_ID);
-    var shResults = ss.getSheetByName(SHEET_MAIN);
-    if (shResults) {
-      shResults.appendRow([
-        new Date(),
-        pollTrends.join(', '),
-        '',
-        '',
-        new Date()
-      ]);
-    }
+    // שמירת תאריך שליחה ב-Properties
+    var props2 = PropertiesService.getScriptProperties();
+    props2.setProperty(PROP_KEY_LAST_SURVEY, new Date().toISOString());
 
-    // שמירת טרנד נוכחי ב-Properties
-    PropertiesService.getScriptProperties().setProperty(
-      PROP_KEY_LAST_SURVEY,
-      Utilities.formatDate(new Date(), TIMEZONE, 'yyyy-MM-dd')
-    );
-
-    Logger.log('sendPoll: נשלח בהצלחה עם ' + pollTrends.length + ' טרנדים');
+    Logger.log('sendPoll: סקר נשלח בהצלחה עם ' + pollTrends.length + ' טרנדים');
     return true;
 
   } catch (e) {
-    Logger.log('sendPoll — שגיאה: ' + e.message);
+    Logger.log('שגיאה ב-sendPoll: ' + e.message);
     return false;
   }
 }
@@ -169,68 +162,88 @@ function sendPoll(trends) {
 // ============================================================
 
 /**
- * sendWeeklyContent — שולח חומרי שבוע (סרטון, מצרכים, עלות) לקבוצת ווטסאפ
- * @param {number} week — מספר השבוע לשליחה
- * @return {boolean} האם השליחה הצליחה
+ * שולחת חומרים שבועיים (מתכון, סרטון, מצרכים) לקבוצת ווטסאפ
+ * @param {number} week - מספר השבוע
+ * @return {boolean} הצלחה/כישלון
  */
 function sendWeeklyContent(week) {
   try {
-    var ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
-    var shRM  = ss.getSheetByName(SHEET_RESULTS_MGR);
-
-    if (!shRM) {
-      Logger.log('sendWeeklyContent: טאב Results לא נמצא');
-      return false;
+    // בדיקת קלט
+    if (!week || isNaN(week)) {
+      throw new Error('מספר שבוע לא תקין: ' + week);
     }
 
-    var data    = shRM.getDataRange().getValues();
-    var content = null;
+    var ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet = ss.getSheetByName(SHEET_RESULTS_MGR);
 
-    // מאתרים את שורת השבוע המבוקש
-    for (var i = DATA_START_ROW - 1; i < data.length; i++) {
+    if (!sheet) {
+      throw new Error('טאב Results לא נמצא');
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < DATA_START_ROW) {
+      throw new Error('אין נתונים בטאב Results');
+    }
+
+    var data    = sheet.getRange(DATA_START_ROW, 1, lastRow - HEADER_ROW, 7).getValues();
+    var content = null;
+    var rowIndex = -1;
+
+    // חיפוש שורת השבוע
+    for (var i = 0; i < data.length; i++) {
       if (String(data[i][COL_RM_WEEK - 1]) === String(week)) {
-        content = data[i];
+        content  = data[i];
+        rowIndex = i + DATA_START_ROW;
         break;
       }
     }
 
     if (!content) {
-      Logger.log('sendWeeklyContent: לא נמצאו חומרים לשבוע ' + week);
-      return false;
+      throw new Error('לא נמצאו חומרים לשבוע ' + week);
     }
 
-    var trend       = content[COL_RM_TREND       - 1];
-    var video       = content[COL_RM_VIDEO       - 1];
-    var ingredients = content[COL_RM_INGREDIENTS - 1];
-    var cost        = content[COL_RM_COST        - 1];
+    // בדיקה אם כבר נשלח
+    if (content[COL_RM_SENT - 1] === true || content[COL_RM_SENT - 1] === 'TRUE') {
+      Logger.log('sendWeeklyContent: חומרי שבוע ' + week + ' כבר נשלחו — מדלג');
+      return true;
+    }
+
+    var trend       = content[COL_RM_TREND - 1]       || 'לא צוין';
+    var video       = content[COL_RM_VIDEO - 1]       || '';
+    var ingredients = content[COL_RM_INGREDIENTS - 1] || 'לא צוינו';
+    var cost        = content[COL_RM_COST - 1]        || 'לא ידוע';
 
     // בניית הודעה
-    var msg = '🍽️ *חומרי השבוע — ' + trend + '* 🍽️\n\n';
-    if (video)       msg += '🎬 סרטון: ' + video + '\n\n';
-    if (ingredients) msg += '🛒 מצרכים:\n' + ingredients + '\n\n';
-    if (cost)        msg += '💰 עלות משוערת: ' + cost + '\n\n';
-    msg += 'בהצלחה לכולם! 👨‍🍳';
+    var message = '🍽️ *חומרי השבוע — ' + trend + '*\n\n';
+    message += '📋 *מצרכים:*\n' + ingredients + '\n\n';
+    message += '💰 *עלות משוערת:* ' + cost + '\n\n';
 
-    // שליחה דרך Green API
-    var props      = PropertiesService.getScriptProperties();
-    var instanceId = props.getProperty('INSTANCE_ID');
-    var apiToken   = props.getProperty('GREEN_API_TOKEN');
-
-    if (!instanceId || !apiToken) {
-      Logger.log('sendWeeklyContent: חסרים INSTANCE_ID או GREEN_API_TOKEN');
-      return false;
+    if (video) {
+      message += '🎬 *סרטון הכנה:* ' + video + '\n\n';
     }
 
-    var url     = 'https://api.green-api.com/waInstance' + instanceId + '/sendMessage/' + apiToken;
-    var payload = JSON.stringify({
+    message += 'בהצלחה לכולם! 👨‍🍳👩‍🍳';
+
+    // קריאת Script Properties
+    var props      = PropertiesService.getScriptProperties();
+    var token      = props.getProperty('GREEN_API_TOKEN');
+    var instanceId = props.getProperty('INSTANCE_ID');
+
+    if (!token || !instanceId) {
+      throw new Error('GREEN_API_TOKEN או INSTANCE_ID חסרים ב-Script Properties');
+    }
+
+    // שליחה דרך Green API
+    var url     = 'https://api.green-api.com/waInstance' + instanceId + '/sendMessage/' + token;
+    var payload = {
       chatId:  WHATSAPP_GROUP_ID,
-      message: msg
-    });
+      message: message
+    };
 
     var options = {
-      method:             'post',
-      contentType:        'application/json',
-      payload:            payload,
+      method:      'POST',
+      contentType: 'application/json',
+      payload:     JSON.stringify(payload),
       muteHttpExceptions: true
     };
 
@@ -238,24 +251,20 @@ function sendWeeklyContent(week) {
     var code     = response.getResponseCode();
 
     if (code !== 200) {
-      Logger.log('sendWeeklyContent: שגיאת HTTP ' + code + ' — ' + response.getContentText());
-      return false;
+      throw new Error('Green API החזיר קוד ' + code + ': ' + response.getContentText());
     }
 
-    // עדכון סטטוס שליחה בגיליון
-    for (var r = DATA_START_ROW - 1; r < data.length; r++) {
-      if (String(data[r][COL_RM_WEEK - 1]) === String(week)) {
-        shRM.getRange(r + 1, COL_RM_SENT).setValue(true);
-        shRM.getRange(r + 1, COL_RM_SAVED_AT).setValue(new Date());
-        break;
-      }
-    }
+    // עדכון עמודת "נשלח" בגיליון
+    sheet.getRange(rowIndex, COL_RM_SENT).setValue(true);
+    sheet.getRange(rowIndex, COL_RM_SAVED_AT).setValue(
+      Utilities.formatDate(new Date(), TIMEZONE, 'dd/MM/yyyy HH:mm:ss')
+    );
 
     Logger.log('sendWeeklyContent: חומרי שבוע ' + week + ' נשלחו בהצלחה');
     return true;
 
   } catch (e) {
-    Logger.log('sendWeeklyContent — שגיאה: ' + e.message);
+    Logger.log('שגיאה ב-sendWeeklyContent: ' + e.message);
     return false;
   }
 }
